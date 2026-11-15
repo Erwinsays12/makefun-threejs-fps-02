@@ -1,11 +1,12 @@
-// Determinism: one seeded generator feeds every random choice the simulation
-// makes (bot routes, spread, bursts, smoke puffs), so a seed replays the same
-// round. Rendering never draws from it, and the browser clock never enters the
-// simulation — the fixed step in main.js is the only clock the sim sees.
-export function mulberry32(initial) {
-  let a = initial >>> 0;
-  return function random() {
-    a |= 0;
+// rng.js - deterministic seeded randomness for DUSKLINE.
+//
+// One generator per match. The seed comes from the URL (or the clock for a
+// live game), so a staged scene can reproduce the exact same round twice:
+// same bot picks, same spread rolls, same screenshot.
+
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
@@ -13,10 +14,21 @@ export function mulberry32(initial) {
   };
 }
 
-export function pick(random, array) {
-  return array[Math.floor(random() * array.length)];
-}
-
-export function range(random, min, max) {
-  return min + random() * (max - min);
+export class Rng {
+  constructor(seed) {
+    this.next = mulberry32(seed === undefined ? 1 : seed);
+  }
+  float() { return this.next(); }
+  range(min, max) { return min + (max - min) * this.next(); }
+  int(min, max) { return Math.floor(this.range(min, max + 1)); }
+  pick(list) { return list[Math.floor(this.next() * list.length)]; }
+  chance(p) { return this.next() < p; }
+  sign() { return this.next() < 0.5 ? -1 : 1; }
+  shuffle(list) {
+    for (let i = list.length - 1; i > 0; i--) {
+      const j = Math.floor(this.next() * (i + 1));
+      const tmp = list[i]; list[i] = list[j]; list[j] = tmp;
+    }
+    return list;
+  }
 }

@@ -1,162 +1,114 @@
-// Player movement: acceleration, friction, gravity, crouch and jump, resolved
-// as a box against the world's colliders one axis at a time, so a wall never
-// swallows the player. Aiming down sights (speedScale < 1) slows the walk, the
-// way a shouldered rifle should. Health and armour live here too: damage is
-// applied by main.js, never by the renderer.
+// player.js - the human fighter: movement, stance, and the shared
+// combatant shape the gunplay solver reads (pos, crouch, team, health).
+//
+// Movement is acceleration-based with ground friction, so a running
+// player takes a moment to stop - and that moment is exactly when their
+// spread cone is wide. Crouching and aiming down sights trade speed for
+// accuracy; jumping trades all of it.
+
 import * as THREE from 'three';
+import { Gun } from './weapons.js';
 
-const RADIUS = 0.34;
-const STAND_HEIGHT = 1.72;
-const CROUCH_HEIGHT = 1.12;
-const STAND_EYE = 1.6;
-const CROUCH_EYE = 1.02;
-const WALK_SPEED = 5.2;
-const CROUCH_SPEED = 2.4;
-const GROUND_ACCEL = 42;
-const AIR_ACCEL = 9;
-const FRICTION = 9;
-const GRAVITY = 20;
-const JUMP_SPEED = 6.2;
+export const RUN_SPEED = 4.6;
 
-export function createPlayer(colliders, spawn) {
-  const player = {
-    position: new THREE.Vector3(spawn.x, 0, spawn.z),
-    velocity: new THREE.Vector3(),
-    yaw: 0,
-    pitch: 0,
-    eye: STAND_EYE,
-    onGround: true,
-    crouching: false,
-    height: STAND_HEIGHT,
-    health: 100,
-    armor: 0,
-    alive: true,
-  };
-  const probe = new THREE.Box3();
-  const wish = new THREE.Vector3();
-
-  // lift keeps the feet and the crown out of the horizontal tests, so standing
-  // on the floor is not read as walking into a wall.
-  function overlaps(x, y, z, height, lift) {
-    probe.min.set(x - RADIUS, y + lift, z - RADIUS);
-    probe.max.set(x + RADIUS, y + height - lift, z + RADIUS);
-    for (const collider of colliders) if (probe.intersectsBox(collider)) return collider;
-    return null;
+export class Player {
+  constructor() {
+    this.isPlayer = true;
+    this.team = 'atk';
+    this.name = 'YOU';
+    this.pos = new THREE.Vector3(-20.5, 0, 0);
+    this.vel = new THREE.Vector3();
+    this.yaw = -Math.PI / 2;      // facing east, toward the sites
+    this.pitch = 0;
+    this.crouch = false;
+    this.onGround = true;
+    this.alive = true;
+    this.health = 100;
+    this.armor = false;
+    this.money = 800;
+    this.gun = new Gun();
+    this.smokes = 0;
+    this.hasBomb = false;
+    this.ads = false;
+    this.speed2d = 0;
+    this.noise = 0;               // hearing radius currently given away
+    this.stepAcc = 0;
+    this.kills = 0;
+    this.deaths = 0;
+    this._eye = new THREE.Vector3();
+    this._dir = new THREE.Vector3();
   }
 
-  function look(dx, dy, sensitivity = 0.0022) {
-    player.yaw -= dx * sensitivity;
-    player.pitch = Math.max(-1.45, Math.min(1.45, player.pitch - dy * sensitivity));
+  eyeHeight() { return this.crouch ? 1.18 : 1.62; }
+  eye(out) { return out.set(this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z); }
+  lookDir(out) {
+    const cp = Math.cos(this.pitch);
+    return out.set(-Math.sin(this.yaw) * cp, Math.sin(this.pitch), -Math.cos(this.yaw) * cp);
+  }
+  stance() {
+    return { speed: this.speed2d, onGround: this.onGround, crouch: this.crouch, ads: this.ads, bloom: this.gun.bloom };
   }
 
-  function recoil(pitchKick, yawKick) {
-    player.pitch = Math.min(1.45, player.pitch + pitchKick);
-    player.yaw += yawKick;
+  reset(x, z, yaw) {
+    this.pos.set(x, 0, z);
+    this.vel.set(0, 0, 0);
+    this.yaw = yaw;
+    this.pitch = 0;
+    this.health = 100;
+    this.alive = true;
+    this.crouch = false;
+    this.ads = false;
+    this.hasBomb = false;
+    this.noise = 0;
   }
 
-  function step(dt, keys, speedScale = 1) {
-    if (!player.alive) return;
-    const crouching = keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('KeyC');
-    if (crouching && !player.crouching) {
-      player.crouching = true;
-      player.height = CROUCH_HEIGHT;
-    } else if (!crouching && player.crouching && !overlaps(player.position.x, player.position.y, player.position.z, STAND_HEIGHT, 0.02)) {
-      player.crouching = false;
-      player.height = STAND_HEIGHT;
-    }
-    const eyeTarget = player.crouching ? CROUCH_EYE : STAND_EYE;
-    player.eye += (eyeTarget - player.eye) * Math.min(1, dt * 12);
+  // input: {f, b, l, r, jump, crouch, walk} booleans for this step.
+  // fx.footstep() is called at a distance-based cadence.
+  update(dt, input, world, fx) {
+    if (!this.alive) return;
+    this.crouch = !!input.crouch;
+    const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
+    let wx = (-sy) * (input.f ? 1 : 0) + (-sy) * (input.b ? -1 : 0) + cy * (input.r ? 1 : 0) + cy * (input.l ? -1 : 0);
+    let wz = (-cy) * (input.f ? 1 : 0) + (-cy) * (input.b ? -1 : 0) + (-sy) * (input.r ? 1 : 0) + (-sy) * (input.l ? -1 : 0);
+    const wl = Math.sqrt(wx * wx + wz * wz);
+    if (wl > 0) { wx /= wl; wz /= wl; }
 
-    const forward = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
-    const strafe = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-    wish.set(0, 0, 0);
-    if (forward || strafe) {
-      const sin = Math.sin(player.yaw);
-      const cos = Math.cos(player.yaw);
-      wish.set(-sin * forward + cos * strafe, 0, -cos * forward - sin * strafe).normalize();
+    let maxSpeed = RUN_SPEED;
+    if (this.crouch) maxSpeed = 2.3;
+    else if (input.walk) maxSpeed = 2.5;
+    if (this.ads) maxSpeed *= 0.55;
+
+    const rate = this.onGround ? 11 : 1.1;
+    const blend = Math.min(1, rate * dt);
+    this.vel.x += (wx * maxSpeed - this.vel.x) * blend;
+    this.vel.z += (wz * maxSpeed - this.vel.z) * blend;
+
+    if (input.jump && this.onGround) {
+      this.vel.y = 4.8;
+      this.onGround = false;
+    }
+    this.vel.y -= 13 * dt;
+
+    this.pos.x += this.vel.x * dt;
+    this.pos.z += this.vel.z * dt;
+    this.pos.y += this.vel.y * dt;
+    world.moveCircle(this.pos, 0.35);
+    if (this.pos.y <= 0) {
+      this.pos.y = 0;
+      this.vel.y = 0;
+      this.onGround = true;
     }
 
-    const speed = (player.crouching ? CROUCH_SPEED : WALK_SPEED) * speedScale;
-    const blend = Math.min(1, (player.onGround ? GROUND_ACCEL : AIR_ACCEL) * dt / speed);
-    player.velocity.x += (wish.x * speed - player.velocity.x) * blend;
-    player.velocity.z += (wish.z * speed - player.velocity.z) * blend;
-    if (player.onGround && !wish.lengthSq()) {
-      const damp = Math.max(0, 1 - FRICTION * dt);
-      player.velocity.x *= damp;
-      player.velocity.z *= damp;
+    this.speed2d = Math.sqrt(this.vel.x * this.vel.x + this.vel.z * this.vel.z);
+    // Noise given away: running is loud, walking and crouching are not.
+    this.noise = (this.onGround && this.speed2d > 3.4) ? 11 : 0;
+    if (this.onGround && this.speed2d > 0.6) {
+      this.stepAcc += this.speed2d * dt;
+      if (this.stepAcc > 2.3) {
+        this.stepAcc = 0;
+        if (fx && fx.footstep) fx.footstep();
+      }
     }
-
-    if (keys.has('Space') && player.onGround) {
-      player.velocity.y = JUMP_SPEED;
-      player.onGround = false;
-    }
-    player.velocity.y -= GRAVITY * dt;
-
-    const nextX = player.position.x + player.velocity.x * dt;
-    if (!overlaps(nextX, player.position.y, player.position.z, player.height, 0.04)) player.position.x = nextX;
-    else player.velocity.x = 0;
-    const nextZ = player.position.z + player.velocity.z * dt;
-    if (!overlaps(player.position.x, player.position.y, nextZ, player.height, 0.04)) player.position.z = nextZ;
-    else player.velocity.z = 0;
-
-    player.position.y += player.velocity.y * dt;
-    player.onGround = false;
-    const hit = overlaps(player.position.x, player.position.y, player.position.z, player.height, 0);
-    if (hit && player.velocity.y <= 0) {
-      player.position.y = hit.max.y;
-      player.velocity.y = 0;
-      player.onGround = true;
-    } else if (hit) {
-      player.position.y = hit.min.y - player.height;
-      player.velocity.y = 0;
-    }
-    if (player.position.y < 0) {
-      player.position.y = 0;
-      player.velocity.y = 0;
-      player.onGround = true;
-    }
-    player.velocity.y = Math.max(-30, player.velocity.y);
+    this.gun.update(dt);
   }
-
-  function damage(amount) {
-    if (!player.alive) return false;
-    let remaining = amount;
-    if (player.armor > 0) {
-      const absorbed = Math.min(player.armor, Math.ceil(amount * 0.5));
-      player.armor -= absorbed;
-      remaining -= absorbed;
-    }
-    player.health -= remaining;
-    if (player.health <= 0) {
-      player.health = 0;
-      player.alive = false;
-      return true;
-    }
-    return false;
-  }
-
-  function reset(spawnPoint) {
-    player.position.set(spawnPoint.x, 0, spawnPoint.z);
-    player.velocity.set(0, 0, 0);
-    player.yaw = 0;
-    player.pitch = 0;
-    player.health = 100;
-    player.armor = 0;
-    player.alive = true;
-    player.crouching = false;
-    player.height = STAND_HEIGHT;
-    player.eye = STAND_EYE;
-  }
-
-  return {
-    state: player,
-    step,
-    look,
-    recoil,
-    damage,
-    reset,
-    groundSpeed() {
-      return Math.hypot(player.velocity.x, player.velocity.z);
-    },
-  };
 }

@@ -1,66 +1,79 @@
-// Keyboard and mouse, and the pointer lock that turns the mouse into look.
-// Plain browser APIs only: the game asks the canvas for pointer lock and reads
-// movementX/Y while it holds it. Right mouse held is aim-down-sights; the sim
-// reads it every step. Pressed keys are queued as one-shot events (buy, plant,
-// throw, switch) so the simulation consumes each exactly once per fixed step.
-export function createInput(canvas, onLockChange) {
-  const keys = new Set();
-  const pressed = [];
-  const state = { keys, locked: false, firing: false, aiming: false, lookX: 0, lookY: 0 };
+// input.js - raw keyboard and mouse state for the player and the menus.
+//
+// Two kinds of signal live here: held state (the keys set, mouse buttons)
+// that movement reads every simulation step, and edge events (pressed,
+// leftPressed, wheel) that menus and triggers read once per frame and
+// the frame loop then clears.
 
-  function setKey(event, down) {
-    if (down) {
-      if (!keys.has(event.code)) pressed.push(event.code);
-      keys.add(event.code);
-    } else keys.delete(event.code);
-    if (event.code === 'Space') event.preventDefault();
+export class Input {
+  constructor(canvas, onLockChange) {
+    this.canvas = canvas;
+    this.keys = new Set();
+    this.pressed = new Set();
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    this.leftDown = false;
+    this.leftPressed = false;
+    this.rightDown = false;
+    this.wheel = 0;
+    this.locked = false;
+    this.onLockChange = onLockChange || (() => {});
+
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
+      if (!e.repeat) this.pressed.add(e.code);
+      this.keys.add(e.code);
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('blur', () => this.keys.clear());
+
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === canvas;
+      if (!this.locked) { this.leftDown = false; this.rightDown = false; }
+      this.onLockChange(this.locked);
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!this.locked) return;
+      this.mouseDX += e.movementX || 0;
+      this.mouseDY += e.movementY || 0;
+    });
+    window.addEventListener('mousedown', (e) => {
+      if (e.button === 0) { this.leftDown = true; this.leftPressed = true; }
+      if (e.button === 2) this.rightDown = true;
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 0) this.leftDown = false;
+      if (e.button === 2) this.rightDown = false;
+    });
+    window.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    window.addEventListener('contextmenu', (e) => e.preventDefault());
   }
 
-  window.addEventListener('keydown', (event) => setKey(event, true));
-  window.addEventListener('keyup', (event) => setKey(event, false));
-  window.addEventListener('blur', () => keys.clear());
-  window.addEventListener('mousemove', (event) => {
-    if (!state.locked) return;
-    state.lookX += event.movementX;
-    state.lookY += event.movementY;
-  });
-  window.addEventListener('mousedown', (event) => {
-    if (!state.locked) return;
-    if (event.button === 0) state.firing = true;
-    if (event.button === 2) state.aiming = true;
-  });
-  window.addEventListener('mouseup', (event) => {
-    if (event.button === 0) state.firing = false;
-    if (event.button === 2) state.aiming = false;
-  });
-  window.addEventListener('contextmenu', (event) => event.preventDefault());
-  document.addEventListener('pointerlockchange', () => {
-    state.locked = document.pointerLockElement === canvas;
-    if (!state.locked) {
-      keys.clear();
-      state.firing = false;
-      state.aiming = false;
-    }
-    onLockChange(state.locked);
-  });
+  lock() { this.canvas.requestPointerLock(); }
+  unlock() { if (document.pointerLockElement) document.exitPointerLock(); }
 
-  return {
-    state,
-    requestLock() {
-      canvas.requestPointerLock();
-    },
-    takeLook() {
-      const x = state.lookX;
-      const y = state.lookY;
-      state.lookX = 0;
-      state.lookY = 0;
-      return { x, y };
-    },
-    takePressed() {
-      if (pressed.length === 0) return [];
-      const out = pressed.slice();
-      pressed.length = 0;
-      return out;
-    },
-  };
+  moveInput() {
+    return {
+      f: this.keys.has('KeyW') || this.keys.has('ArrowUp'),
+      b: this.keys.has('KeyS') || this.keys.has('ArrowDown'),
+      l: this.keys.has('KeyA') || this.keys.has('ArrowLeft'),
+      r: this.keys.has('KeyD') || this.keys.has('ArrowRight'),
+      jump: this.pressed.has('Space'),
+      crouch: this.keys.has('ControlLeft') || this.keys.has('KeyC'),
+      walk: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
+    };
+  }
+
+  consumeMouse() {
+    const dx = this.mouseDX, dy = this.mouseDY;
+    this.mouseDX = 0; this.mouseDY = 0;
+    return [dx, dy];
+  }
+
+  // Called once per rendered frame, after the simulation steps ran.
+  endFrame() {
+    this.pressed.clear();
+    this.leftPressed = false;
+    this.wheel = 0;
+  }
 }

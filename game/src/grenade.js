@@ -1,129 +1,136 @@
-// Smoke grenades: a thrown canister with gravity and a bounce, which blooms
-// into a grey cloud that blocks bot line of sight for twelve seconds. The cloud
-// is a cluster of transparent spheres, cheap to draw and honest about its
-// radius: bots check the same spheres main.js renders, so what the player sees
-// is what the AI sees.
+// grenade.js - thrown smoke: the arc, the bounce, and the cloud.
+//
+// A smoke grenade is the one utility in DUSKLINE. Thrown, it arcs,
+// bounces off the yard's boxes, pops, and grows into a grey cloud that
+// lasts about sixteen seconds. The cloud is a sphere for every system
+// that cares: bot vision stops at it, and bullets fired through it hit
+// nothing behind it.
+
 import * as THREE from 'three';
+import { mat, COLORS } from './palette.js';
 
-const GRAVITY = 12;
-const CLOUD_SECONDS = 12;
-const CLOUD_RADIUS = 3.2;
-const PUFFS = 9;
+const CLOUD_R = 3.1;
+const CLOUD_TTL = 16;
+const PUFF_OFFSETS = [
+  [0, 0, 0], [1.25, 0.3, 0.4], [-1.15, 0.2, -0.5], [0.4, 0.55, -1.15],
+  [-0.5, 0.4, 1.1], [0.95, -0.25, -0.9], [-0.95, -0.15, 0.85], [0.1, 0.8, 0.2],
+];
 
-export function createGrenades(scene, colliders) {
-  const grenades = [];
-  const clouds = [];
-  const puffGeometry = new THREE.SphereGeometry(1, 10, 8);
-  const puffMaterial = new THREE.MeshStandardMaterial({
-    color: new THREE.Color('#9aa2ab'), transparent: true, opacity: 0.42,
-    roughness: 1, metalness: 0, depthWrite: false,
-  });
-  const canisterGeometry = new THREE.SphereGeometry(0.09, 10, 8);
-  const canisterMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color('#d8b13a'), roughness: 0.5, metalness: 0.3 });
-  const probe = new THREE.Box3();
+export class SmokeSystem {
+  constructor(scene) {
+    this.scene = scene;
+    this.clouds = [];        // {x,y,z,r,active,age,group,material}
+    this.projectiles = [];   // {pos,vel,mesh,age}
+    this.cloudGeo = new THREE.IcosahedronGeometry(1.55, 1);
+    this.projGeo = new THREE.SphereGeometry(0.09, 10, 8);
+    this.projMat = mat(0x44503c, { rough: 0.6 });
+  }
 
-  function throwGrenade(origin, direction, random) {
-    const mesh = new THREE.Mesh(canisterGeometry, canisterMaterial);
+  throwFrom(origin, dir, power = 13) {
+    const mesh = new THREE.Mesh(this.projGeo, this.projMat);
     mesh.position.copy(origin);
-    scene.add(mesh);
-    grenades.push({
-      mesh,
-      velocity: direction.clone().multiplyScalar(11).add(new THREE.Vector3(0, 4.5, 0)),
-      fuse: 1.6,
-      bounced: false,
+    this.scene.add(mesh);
+    this.projectiles.push({
+      pos: origin.clone(),
+      vel: new THREE.Vector3(dir.x * power, dir.y * power + 2.2, dir.z * power),
+      mesh, age: 0,
     });
-    return true;
   }
 
-  function bloom(position, random) {
-    const group = new THREE.Group();
-    for (let i = 0; i < PUFFS; i += 1) {
-      const puff = new THREE.Mesh(puffGeometry, puffMaterial);
-      const angle = random() * Math.PI * 2;
-      const radius = random() * CLOUD_RADIUS * 0.55;
-      puff.position.set(Math.cos(angle) * radius, 0.6 + random() * 1.6, Math.sin(angle) * radius);
-      const scale = 1.1 + random() * 1.3;
-      puff.scale.setScalar(scale);
-      group.add(puff);
-    }
-    group.position.copy(position);
-    group.position.y = 0;
-    scene.add(group);
-    clouds.push({ group, center: new THREE.Vector3(position.x, 1.2, position.z), left: CLOUD_SECONDS });
-  }
-
-  function step(dt, random) {
-    for (let i = grenades.length - 1; i >= 0; i -= 1) {
-      const grenade = grenades[i];
-      grenade.fuse -= dt;
-      grenade.velocity.y -= GRAVITY * dt;
-      grenade.mesh.position.addScaledVector(grenade.velocity, dt);
-      const p = grenade.mesh.position;
-      probe.min.set(p.x - 0.09, p.y - 0.09, p.z - 0.09);
-      probe.max.set(p.x + 0.09, p.y + 0.09, p.z + 0.09);
-      let hit = false;
-      for (const collider of colliders) {
-        if (probe.intersectsBox(collider)) { hit = true; break; }
-      }
-      if (hit && !grenade.bounced) {
-        grenade.velocity.multiplyScalar(0.45);
-        grenade.velocity.y = Math.abs(grenade.velocity.y) * 0.4 + 1.5;
-        grenade.bounced = true;
-      }
-      if (p.y < 0.09) {
-        p.y = 0.09;
-        grenade.velocity.y = Math.abs(grenade.velocity.y) * 0.35;
-        grenade.velocity.x *= 0.7;
-        grenade.velocity.z *= 0.7;
-      }
-      if (grenade.fuse <= 0) {
-        bloom(grenade.mesh.position, random);
-        scene.remove(grenade.mesh);
-        grenades.splice(i, 1);
-      }
-    }
-    for (let i = clouds.length - 1; i >= 0; i -= 1) {
-      const cloud = clouds[i];
-      cloud.left -= dt;
-      const fade = Math.min(1, cloud.left / 2);
-      cloud.group.traverse((mesh) => {
-        if (mesh.isMesh) mesh.material.opacity = 0.42 * fade;
+  spawnCloud(x, z) {
+    let cloud = this.clouds.find(c => !c.active);
+    if (!cloud) {
+      if (this.clouds.length >= 6) return;
+      const material = new THREE.MeshLambertMaterial({
+        color: 0xc9ccd2, transparent: true, opacity: 0, depthWrite: false,
       });
-      if (cloud.left <= 0) {
-        scene.remove(cloud.group);
-        clouds.splice(i, 1);
+      const group = new THREE.Group();
+      for (const [ox, oy, oz] of PUFF_OFFSETS) {
+        const puff = new THREE.Mesh(this.cloudGeo, material);
+        puff.position.set(ox, oy, oz);
+        group.add(puff);
       }
+      group.visible = false;
+      this.scene.add(group);
+      cloud = { x: 0, y: 0, z: 0, r: 0, active: false, age: 0, group, material };
+      this.clouds.push(cloud);
+    }
+    cloud.x = x; cloud.y = 1.15; cloud.z = z;
+    cloud.r = 0.4; cloud.age = 0; cloud.active = true;
+    cloud.group.position.set(x, 1.15, z);
+    cloud.group.visible = true;
+  }
+
+  update(dt, world) {
+    // Projectiles in flight.
+    for (let i = this.projectiles.length - 1; i >= 0; i--) {
+      const p = this.projectiles[i];
+      p.age += dt;
+      p.vel.y -= 13.5 * dt;
+      p.pos.addScaledVector(p.vel, dt);
+      // Bounce off the ground.
+      if (p.pos.y < 0.1) {
+        p.pos.y = 0.1;
+        p.vel.y = Math.abs(p.vel.y) * 0.35;
+        p.vel.x *= 0.7; p.vel.z *= 0.7;
+        if (Math.abs(p.vel.y) < 0.7) p.vel.y = 0;
+      }
+      // Bounce off boxes: push out along the shallowest axis.
+      for (const c of world.colliders) {
+        if (p.pos.x > c.minX - 0.1 && p.pos.x < c.maxX + 0.1 &&
+            p.pos.z > c.minZ - 0.1 && p.pos.z < c.maxZ + 0.1 && p.pos.y < c.h) {
+          const left = p.pos.x - (c.minX - 0.1), right = (c.maxX + 0.1) - p.pos.x;
+          const near = p.pos.z - (c.minZ - 0.1), far = (c.maxZ + 0.1) - p.pos.z;
+          const m = Math.min(left, right, near, far);
+          if (m === left) { p.pos.x = c.minX - 0.1; p.vel.x = -Math.abs(p.vel.x) * 0.35; }
+          else if (m === right) { p.pos.x = c.maxX + 0.1; p.vel.x = Math.abs(p.vel.x) * 0.35; }
+          else if (m === near) { p.pos.z = c.minZ - 0.1; p.vel.z = -Math.abs(p.vel.z) * 0.35; }
+          else { p.pos.z = c.maxZ + 0.1; p.vel.z = Math.abs(p.vel.z) * 0.35; }
+        }
+      }
+      p.mesh.position.copy(p.pos);
+      const settled = p.vel.lengthSq() < 0.5 && p.pos.y <= 0.11;
+      if (settled || p.age > 2.2) {
+        this.scene.remove(p.mesh);
+        this.projectiles.splice(i, 1);
+        this.spawnCloud(p.pos.x, p.pos.z);
+      }
+    }
+    // Clouds grow, hold, then thin out.
+    for (const c of this.clouds) {
+      if (!c.active) continue;
+      c.age += dt;
+      const grow = Math.min(1, c.age / 1.3);
+      c.r = 0.4 + (CLOUD_R - 0.4) * grow;
+      const fade = c.age > CLOUD_TTL - 2.5 ? Math.max(0, (CLOUD_TTL - c.age) / 2.5) : 1;
+      c.material.opacity = 0.6 * grow * fade;
+      const s = 0.35 + 0.65 * grow;
+      c.group.scale.set(s, s * 0.82, s);
+      if (c.age >= CLOUD_TTL) { c.active = false; c.group.visible = false; }
     }
   }
 
-  // A segment is smoke-blocked when it passes within the cloud's radius of its
-  // centre. The same test answers for the player's eyes and the bots' eyes.
-  function blocksSight(from, to) {
-    for (const cloud of clouds) {
-      const c = cloud.center;
-      const abx = to.x - from.x;
-      const aby = to.y - from.y;
-      const abz = to.z - from.z;
-      const acx = c.x - from.x;
-      const acy = c.y - from.y;
-      const acz = c.z - from.z;
-      const lengthSq = abx * abx + aby * aby + abz * abz || 1;
-      let t = (acx * abx + acy * aby + acz * abz) / lengthSq;
-      t = Math.max(0, Math.min(1, t));
-      const dx = from.x + abx * t - c.x;
-      const dy = from.y + aby * t - c.y;
-      const dz = from.z + abz * t - c.z;
-      if (dx * dx + dy * dy + dz * dz < CLOUD_RADIUS * CLOUD_RADIUS) return true;
+  // Does the segment a->b pass through any live cloud?
+  segmentBlocked(a, b) {
+    for (const c of this.clouds) {
+      if (!c.active || c.r < 1.2) continue;
+      // Closest distance from the cloud centre to the segment.
+      const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+      const len2 = abx * abx + aby * aby + abz * abz;
+      let t = 0;
+      if (len2 > 1e-9) {
+        t = ((c.x - a.x) * abx + (c.y - a.y) * aby + (c.z - a.z) * abz) / len2;
+        t = Math.max(0, Math.min(1, t));
+      }
+      const dx = a.x + abx * t - c.x, dy = a.y + aby * t - c.y, dz = a.z + abz * t - c.z;
+      if (dx * dx + dy * dy + dz * dz < c.r * c.r) return true;
     }
     return false;
   }
 
-  function reset() {
-    for (const grenade of grenades) scene.remove(grenade.mesh);
-    for (const cloud of clouds) scene.remove(cloud.group);
-    grenades.length = 0;
-    clouds.length = 0;
+  reset() {
+    for (const p of this.projectiles) this.scene.remove(p.mesh);
+    this.projectiles.length = 0;
+    for (const c of this.clouds) { c.active = false; c.group.visible = false; }
   }
-
-  return { throwGrenade, step, blocksSight, reset, clouds };
 }

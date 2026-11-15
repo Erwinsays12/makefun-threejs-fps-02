@@ -1,186 +1,167 @@
-// The DOM HUD: crosshair, hit marker, health, ammo, timer, score, money, kill
-// feed, buy menu and the one overlay panel. It never touches the simulation;
-// main.js pushes numbers in and reads the play callback out. Buy keys
-// (1/2/3, G smoke, V armour) are read by main.js from the input queue, not by
-// the DOM.
-import { WEAPONS } from './weapons.js';
-import { SMOKE_PRICE, ARMOR_PRICE } from './match.js';
+// hud.js - the DOM layer of the HUD: health, ammunition, money, the
+// round clock, the kill feed, the buy menu, channel bars and banners.
+//
+// The markup and styling live in index.html; this module only reads and
+// writes the elements, so presentation and game logic never mix. Every
+// method is cheap enough to call whenever a value changes.
 
-const COPY = {
-  start: {
-    title: 'DUSKLINE',
-    copy: 'A tactical round-based shooter in Foundry Yard. Plant the bomb at A or B, or eliminate the Raider squad. Click to play.',
-    action: 'Click to play',
-  },
-  paused: {
-    title: 'DUSKLINE',
-    copy: 'Paused. Click to resume.',
-    action: 'Click to resume',
-  },
-  roundwin: {
-    title: 'Round won',
-    copy: '',
-    action: 'Next round',
-  },
-  roundlose: {
-    title: 'Round lost',
-    copy: '',
-    action: 'Next round',
-  },
-  matchwin: {
-    title: 'Match won',
-    copy: 'Vanguard takes Foundry Yard.',
-    action: 'Play again',
-  },
-  matchlose: {
-    title: 'Match lost',
-    copy: 'The Raiders hold Foundry Yard.',
-    action: 'Play again',
-  },
-};
+function el(id) { return document.getElementById(id); }
 
-export function createHud() {
-  const $ = (id) => document.getElementById(id);
-  const overlay = $('overlay');
-  const title = $('overlay-title');
-  const copy = $('overlay-copy');
-  const play = $('play');
-  const ammoMag = $('ammo-mag');
-  const ammoReserve = $('ammo-reserve');
-  const weaponName = $('weapon-name');
-  const healthFill = $('health-fill');
-  const healthValue = $('health-value');
-  const armorValue = $('armor-value');
-  const timerValue = $('timer');
-  const scoreVanguard = document.querySelector('#score .v');
-  const scoreRaider = document.querySelector('#score .r');
-  const roundValue = $('round-label');
-  const moneyValue = $('money');
-  const hitmarker = $('hitmarker');
-  const crosshair = $('crosshair');
-  const feedList = $('feed');
-  const messageBanner = $('message');
-  const bombBanner = $('bomb-banner');
-  const plantBar = $('plant-bar');
-  const plantFill = $('plant-fill');
-  const buyMenu = $('buy-menu');
-  const buyMoney = $('buy-money');
-  const smokesValue = $('smokes-value');
-  const hint = $('hint');
-  let hitTimer = 0;
-  let messageTimer = 0;
-  let last = {};
-
-  function setText(el, value, key) {
-    if (last[key] === value) return;
-    last[key] = value;
-    el.textContent = value;
+export class Hud {
+  constructor() {
+    this.healthNum = el('health-num');
+    this.healthBar = el('health-bar');
+    this.armorTag = el('armor-tag');
+    this.ammoMag = el('ammo-mag');
+    this.ammoReserve = el('ammo-reserve');
+    this.weaponName = el('weapon-name');
+    this.money = el('money');
+    this.timer = el('timer');
+    this.scoreLine = el('score-line');
+    this.feedBox = el('killfeed');
+    this.bannerBox = el('banner');
+    this.bannerTitle = el('banner-title');
+    this.bannerSub = el('banner-sub');
+    this.plantWrap = el('plantbar');
+    this.plantFill = el('plantbar-fill');
+    this.plantLabel = el('plantbar-label');
+    this.buyBox = el('buymenu');
+    this.buyRows = {
+      smg: el('buy-smg'), rifle: el('buy-rifle'), armor: el('buy-armor'), smoke: el('buy-smoke'),
+    };
+    this.cross = el('crosshair');
+    this.hitmark = el('hitmarker');
+    this.vignette = el('vignette');
+    this.bombTagEl = el('bombtag');
+    this.centerMsgEl = el('centermsg');
+    this.board = el('scoreboard');
+    this.boardBody = el('scoreboard-rows');
+    this._bannerTimer = 0;
+    this._lastAmmo = '';
   }
 
-  return {
-    setAmmo(mag, reserve, name) {
-      setText(ammoMag, String(mag), 'mag');
-      setText(ammoReserve, `/ ${reserve}`, 'reserve');
-      setText(weaponName, name, 'weapon');
-      $('ammo').classList.toggle('empty', mag === 0);
-    },
-    setHealth(health, armor) {
-      healthFill.style.width = `${Math.max(0, health)}%`;
-      setText(healthValue, String(Math.ceil(health)), 'health');
-      setText(armorValue, armor > 0 ? `ARMOR ${armor}` : '', 'armor');
-      $('health').classList.toggle('low', health <= 30);
-    },
-    setTimer(seconds, planted) {
-      const value = Math.max(0, Math.ceil(seconds));
-      const text = `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
-      setText(timerValue, text, 'timer');
-      $('timer').classList.toggle('planted', planted);
-    },
-    setScore(vanguard, raider, round) {
-      setText(scoreVanguard, String(vanguard), 'score-v');
-      setText(scoreRaider, String(raider), 'score-r');
-      setText(roundValue, `ROUND ${round}`, 'round');
-    },
-    setMoney(money) {
-      setText(moneyValue, `$${money}`, 'money');
-      setText(buyMoney, `$${money}`, 'buymoney');
-    },
-    setSmokes(count) {
-      setText(smokesValue, `SMOKE x${count}`, 'smokes');
-    },
-    hitMarker(killed, holdMs = 90) {
-      hitmarker.classList.add('on');
-      hitmarker.style.transform = killed ? 'translate(-50%, -50%) rotate(45deg) scale(1.25)' : '';
-      clearTimeout(hitTimer);
-      hitTimer = setTimeout(() => {
-        hitmarker.classList.remove('on');
-        hitmarker.style.transform = '';
-      }, holdMs);
-    },
-    setCrosshairSpread(spreadPx) {
-      const gap = Math.round(4 + spreadPx);
-      crosshair.style.setProperty('--gap', `${gap}px`);
-    },
-    setFeed(lines) {
-      feedList.innerHTML = lines.map((line) => `<li>${line}</li>`).join('');
-    },
-    showMessage(text, holdMs = 2600) {
-      messageBanner.textContent = text;
-      messageBanner.hidden = false;
-      clearTimeout(messageTimer);
-      messageTimer = setTimeout(() => { messageBanner.hidden = true; }, holdMs);
-    },
-    setBomb(planted, site, seconds) {
-      if (!planted) {
-        bombBanner.hidden = true;
-        return;
+  setHealth(hp, armor) {
+    const v = Math.max(0, Math.ceil(hp));
+    this.healthNum.textContent = v;
+    this.healthBar.style.width = v + '%';
+    this.healthBar.style.background = v <= 30 ? '#e0483e' : v <= 60 ? '#e8a13c' : '#7dd069';
+    this.armorTag.style.visibility = armor ? 'visible' : 'hidden';
+  }
+
+  setAmmo(name, mag, reserve, reloading) {
+    const key = name + '|' + mag + '|' + reserve + '|' + (reloading ? 1 : 0);
+    if (key === this._lastAmmo) return;
+    this._lastAmmo = key;
+    this.weaponName.textContent = reloading ? name + ' - RELOADING' : name;
+    this.ammoMag.textContent = mag;
+    this.ammoReserve.textContent = '/ ' + reserve;
+    this.ammoMag.style.color = mag === 0 ? '#e0483e' : '';
+  }
+
+  setMoney(m) { this.money.textContent = '$' + m; }
+
+  setClock(seconds, urgent) {
+    const s = Math.max(0, Math.ceil(seconds));
+    const text = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    if (this.timer.textContent !== text) this.timer.textContent = text;
+    this.timer.style.color = urgent ? '#e0483e' : '';
+  }
+
+  setScore(atk, def, round, atkName, defName) {
+    this.scoreLine.textContent = atkName + ' ' + atk + '  ·  ROUND ' + round + '  ·  ' + def + ' ' + defName;
+  }
+
+  feed(attacker, victim, headshot, weapon) {
+    const row = document.createElement('div');
+    row.className = 'feed-row';
+    const a = document.createElement('span');
+    a.textContent = attacker;
+    a.className = 'feed-atk';
+    const w = document.createElement('span');
+    w.textContent = ' ▸ ' + weapon + (headshot ? ' ⌖' : '') + ' ▸ ';
+    const v = document.createElement('span');
+    v.textContent = victim;
+    v.className = 'feed-vic';
+    row.append(a, w, v);
+    this.feedBox.prepend(row);
+    while (this.feedBox.children.length > 5) this.feedBox.lastChild.remove();
+    setTimeout(() => { row.style.opacity = '0.25'; }, 4200);
+    setTimeout(() => { row.remove(); }, 5200);
+  }
+
+  banner(title, sub, cls, holdSec = 2.6) {
+    this.bannerTitle.textContent = title;
+    this.bannerSub.textContent = sub || '';
+    this.bannerBox.className = 'show ' + (cls || '');
+    clearTimeout(this._bannerTimer);
+    this._bannerTimer = setTimeout(() => { this.bannerBox.className = ''; }, holdSec * 1000);
+  }
+
+  plantBar(frac, label) {
+    if (frac === null || frac === undefined) {
+      this.plantWrap.style.display = 'none';
+      return;
+    }
+    this.plantWrap.style.display = 'block';
+    this.plantFill.style.width = Math.round(frac * 100) + '%';
+    if (label) this.plantLabel.textContent = label;
+  }
+
+  buyMenu(show, state) {
+    this.buyBox.style.display = show ? 'block' : 'none';
+    if (!show) return;
+    const mark = (row, owned, price) => {
+      if (!row) return;
+      row.classList.toggle('owned', !!owned);
+      row.classList.toggle('poor', !owned && state.money < price);
+    };
+    mark(this.buyRows.smg, state.owned.smg, 1100);
+    mark(this.buyRows.rifle, state.owned.rifle, 2700);
+    mark(this.buyRows.armor, state.armor, 650);
+    mark(this.buyRows.smoke, state.smokes > 0, 300);
+  }
+
+  crosshair(px) {
+    this.cross.style.setProperty('--sp', Math.max(4, Math.min(30, px)) + 'px');
+  }
+
+  hitmarker(kill) {
+    this.hitmark.className = kill ? 'show kill' : 'show';
+    clearTimeout(this._hitTimer);
+    this._hitTimer = setTimeout(() => { this.hitmark.className = ''; }, kill ? 260 : 140);
+  }
+
+  damageFlash() {
+    this.vignette.style.opacity = '0.85';
+    clearTimeout(this._vigTimer);
+    this._vigTimer = setTimeout(() => { this.vignette.style.opacity = '0'; }, 130);
+  }
+
+  bombTag(text) {
+    if (!text) { this.bombTagEl.style.display = 'none'; return; }
+    this.bombTagEl.style.display = 'block';
+    if (this.bombTagEl.textContent !== text) this.bombTagEl.textContent = text;
+  }
+
+  centerMsg(text) {
+    if (!text) { this.centerMsgEl.style.display = 'none'; return; }
+    this.centerMsgEl.style.display = 'block';
+    if (this.centerMsgEl.textContent !== text) this.centerMsgEl.textContent = text;
+  }
+
+  scoreboard(show, rows) {
+    this.board.style.display = show ? 'block' : 'none';
+    if (!show) return;
+    this.boardBody.textContent = '';
+    for (const r of rows) {
+      const tr = document.createElement('tr');
+      for (const cell of [r.name, r.k, r.d, '$' + r.money]) {
+        const td = document.createElement('td');
+        td.textContent = cell;
+        tr.appendChild(td);
       }
-      bombBanner.hidden = false;
-      bombBanner.textContent = `BOMB AT SITE ${site} — ${Math.ceil(seconds)}s`;
-    },
-    setPlant(progress) {
-      if (progress <= 0) {
-        plantBar.hidden = true;
-        return;
-      }
-      plantBar.hidden = false;
-      plantFill.style.width = `${Math.min(100, progress * 100)}%`;
-    },
-    setBuy(open, money, owned) {
-      buyMenu.hidden = !open;
-      if (!open) return;
-      setText(buyMoney, `$${money}`, 'buymoney');
-      for (const id of Object.keys(WEAPONS)) {
-        const row = $(`buy-${id}`);
-        if (!row) continue;
-        const def = WEAPONS[id];
-        row.querySelector('.buy-price').textContent = owned[id] ? 'OWNED' : `$${def.price}`;
-        row.classList.toggle('owned', Boolean(owned[id]));
-        row.classList.toggle('poor', !owned[id] && money < def.price);
-      }
-      const smokeRow = $('buy-smoke');
-      smokeRow.querySelector('.buy-price').textContent = `$${SMOKE_PRICE}`;
-      smokeRow.classList.toggle('poor', money < SMOKE_PRICE);
-      const armorRow = $('buy-armor');
-      armorRow.querySelector('.buy-price').textContent = `$${ARMOR_PRICE}`;
-      armorRow.classList.toggle('poor', money < ARMOR_PRICE);
-    },
-    setHint(text) {
-      setText(hint, text, 'hint');
-    },
-    showOverlay(mode, detail) {
-      const text = COPY[mode];
-      title.textContent = text.title;
-      copy.textContent = mode === 'roundwin' || mode === 'roundlose' ? detail : text.copy;
-      play.textContent = text.action;
-      overlay.hidden = false;
-      play.focus();
-    },
-    hideOverlay() {
-      overlay.hidden = true;
-    },
-    onPlay(handler) {
-      play.addEventListener('click', handler);
-    },
-  };
+      tr.className = r.team;
+      this.boardBody.appendChild(tr);
+    }
+  }
 }

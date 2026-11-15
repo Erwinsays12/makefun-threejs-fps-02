@@ -1,123 +1,124 @@
-// All sound is synthesised with WebAudio: no audio files, no network, nothing
-// to load. One shared noise buffer and a handful of tiny envelopes cover shots,
-// reloads, hits, the bomb's beeps and the round stingers. Created lazily on the
-// first user gesture, because browsers will not start audio before one.
-export function createAudio() {
-  let context = null;
-  let noiseBuffer = null;
-  let master = null;
+// audio.js - every sound in DUSKLINE is synthesised in WebAudio.
+//
+// There are no audio files: a gunshot is a shaped noise burst with a
+// low sine thump, a reload is three filtered clicks, the bomb is a piezo
+// beep, and the explosion is a long noise fall with a sub drop. Distance
+// dulls and quiets other fighters' shots, so your ears give you the same
+// information the bots' hearing model uses.
 
-  function ensure() {
-    if (context) return true;
+export class SoundFX {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.noiseBuf = null;
+  }
+
+  // Must be called from a user gesture (the click that starts a match).
+  init() {
+    if (this.ctx) { this.ctx.resume(); return; }
     try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContext) return false;
-      context = new AudioContext();
-      master = context.createGain();
-      master.gain.value = 0.32;
-      master.connect(context.destination);
-      const length = context.sampleRate * 0.5;
-      noiseBuffer = context.createBuffer(1, length, context.sampleRate);
-      const data = noiseBuffer.getChannelData(0);
-      for (let i = 0; i < length; i += 1) data[i] = Math.random() * 2 - 1;
-    } catch {
-      return false;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.45;
+      this.master.connect(this.ctx.destination);
+      const len = this.ctx.sampleRate;
+      this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = this.noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      this.ambient();
+    } catch (e) {
+      this.ctx = null;
     }
-    return true;
   }
 
-  function noise(duration, filterFreq, gainValue, type = 'lowpass') {
-    if (!ensure()) return;
-    const now = context.currentTime;
-    const source = context.createBufferSource();
-    source.buffer = noiseBuffer;
-    const filter = context.createBiquadFilter();
-    filter.type = type;
-    filter.frequency.value = filterFreq;
-    const gain = context.createGain();
-    gain.gain.setValueAtTime(gainValue, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(master);
-    source.start(now);
-    source.stop(now + duration);
+  ambient() {
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.loop = true;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = 'lowpass'; filt.frequency.value = 320;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0.014;
+    const lfo = this.ctx.createOscillator();
+    lfo.frequency.value = 0.09;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 0.006;
+    lfo.connect(lfoGain); lfoGain.connect(gain.gain);
+    src.connect(filt); filt.connect(gain); gain.connect(this.master);
+    src.start(); lfo.start();
   }
 
-  function tone(freq, duration, gainValue, type = 'sine', slideTo = 0) {
-    if (!ensure()) return;
-    const now = context.currentTime;
-    const oscillator = context.createOscillator();
-    oscillator.type = type;
-    oscillator.frequency.setValueAtTime(freq, now);
-    if (slideTo > 0) oscillator.frequency.exponentialRampToValueAtTime(slideTo, now + duration);
-    const gain = context.createGain();
-    gain.gain.setValueAtTime(gainValue, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
-    oscillator.connect(gain);
-    gain.connect(master);
-    oscillator.start(now);
-    oscillator.stop(now + duration);
+  // A noise burst through a filter. dist in metres (0 = your own gun).
+  burst(dur, freq, gain, dist = 0, type = 'lowpass', sweepTo = 0) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const vol = gain / (1 + dist * 0.085);
+    if (vol < 0.004) return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    src.playbackRate.value = 0.9 + Math.random() * 0.2;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = type;
+    filt.frequency.setValueAtTime(Math.max(240, freq - dist * 55), t);
+    if (sweepTo) filt.frequency.exponentialRampToValueAtTime(sweepTo, t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(filt); filt.connect(g); g.connect(this.master);
+    src.start(t, Math.random() * 0.4, dur + 0.05);
+    src.stop(t + dur + 0.05);
   }
 
-  return {
-    unlock() {
-      ensure();
-      if (context && context.state === 'suspended') context.resume();
-    },
-    shot(kind) {
-      if (kind === 'rifle') noise(0.12, 1800, 0.9);
-      else if (kind === 'smg') noise(0.09, 2400, 0.7);
-      else noise(0.14, 1200, 0.8);
-      tone(180, 0.08, 0.5, 'square', 60);
-    },
-    enemyShot(distance) {
-      const gain = Math.max(0.08, 0.55 - distance * 0.012);
-      noise(0.1, 1400, gain);
-    },
-    dryClick() {
-      tone(1200, 0.04, 0.25, 'square');
-    },
-    reload() {
-      tone(500, 0.06, 0.2, 'square', 300);
-      setTimeout(() => tone(700, 0.06, 0.2, 'square', 400), 350);
-    },
-    hit() {
-      tone(2400, 0.05, 0.3, 'sine');
-    },
-    kill() {
-      tone(1800, 0.07, 0.3, 'sine');
-      setTimeout(() => tone(2400, 0.09, 0.3, 'sine'), 70);
-    },
-    hurt() {
-      noise(0.15, 500, 0.5);
-      tone(120, 0.15, 0.4, 'sawtooth', 70);
-    },
-    plantBeep() {
-      tone(950, 0.09, 0.35, 'sine');
-    },
-    bombTick() {
-      tone(1100, 0.05, 0.22, 'sine');
-    },
-    explosion() {
-      noise(0.9, 300, 1.0);
-      tone(55, 0.8, 0.7, 'sine', 30);
-    },
-    roundWin() {
-      [523, 659, 784].forEach((freq, i) => setTimeout(() => tone(freq, 0.16, 0.3, 'triangle'), i * 110));
-    },
-    roundLose() {
-      [392, 330, 262].forEach((freq, i) => setTimeout(() => tone(freq, 0.18, 0.3, 'triangle'), i * 130));
-    },
-    buy() {
-      tone(880, 0.08, 0.25, 'triangle');
-      setTimeout(() => tone(1174, 0.1, 0.25, 'triangle'), 80);
-    },
-    denied() {
-      tone(220, 0.12, 0.3, 'square', 160);
-    },
-    smoke() {
-      noise(0.5, 900, 0.35, 'bandpass');
-    },
-  };
+  tone(type, f0, f1, dur, gain, delay = 0) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    if (f1 && f1 !== f0) osc.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(gain, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(g); g.connect(this.master);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  }
+
+  shot(kind, dist = 0) {
+    if (kind === 'rifle') {
+      this.burst(0.16, 3400, 0.85, dist, 'lowpass', 300);
+      this.tone('square', 160, 55, 0.1, 0.25 / (1 + dist * 0.1));
+    } else if (kind === 'smg') {
+      this.burst(0.11, 3900, 0.6, dist, 'lowpass', 400);
+      this.tone('square', 190, 70, 0.07, 0.18 / (1 + dist * 0.1));
+    } else {
+      this.burst(0.12, 3200, 0.62, dist, 'lowpass', 350);
+      this.tone('square', 175, 60, 0.08, 0.2 / (1 + dist * 0.1));
+    }
+  }
+  dryFire() { this.burst(0.04, 2500, 0.2, 0, 'highpass'); }
+  reload() {
+    this.burst(0.05, 1800, 0.25, 0, 'bandpass');
+    this.burst(0.05, 1200, 0.3, 0, 'bandpass');
+    setTimeout(() => this.burst(0.06, 2200, 0.32, 0, 'bandpass'), 700);
+  }
+  hitmark(kill) {
+    this.tone('square', kill ? 1320 : 990, kill ? 1320 : 990, 0.05, 0.16);
+    if (kill) this.tone('square', 1760, 1760, 0.07, 0.14, 0.05);
+  }
+  hurt() { this.burst(0.14, 500, 0.4, 0, 'lowpass'); this.tone('sawtooth', 110, 60, 0.14, 0.12); }
+  footstep(running) { this.burst(running ? 0.07 : 0.05, 700, running ? 0.1 : 0.05); }
+  botStep(dist) { this.burst(0.05, 650, 0.12, dist); }
+  throwWhoosh() { this.burst(0.18, 900, 0.16, 0, 'bandpass', 2400); }
+  smokePop() { this.burst(0.3, 500, 0.3, 0, 'lowpass', 140); }
+  plantBeep(last) { this.tone('square', last ? 1560 : 1180, last ? 1560 : 1180, last ? 0.16 : 0.07, 0.12); }
+  channelTick() { this.tone('square', 880, 880, 0.03, 0.05); }
+  explosion(dist = 0) {
+    this.burst(1.4, 900, 1.0, dist, 'lowpass', 60);
+    this.tone('sine', 120, 28, 1.2, 0.7 / (1 + dist * 0.05));
+  }
+  buy() { this.tone('square', 740, 740, 0.05, 0.12); this.tone('square', 1180, 1180, 0.06, 0.12, 0.06); }
+  denied() { this.tone('square', 220, 180, 0.11, 0.14); }
+  roundWin() { this.tone('triangle', 523, 523, 0.14, 0.2); this.tone('triangle', 784, 784, 0.22, 0.2, 0.12); }
+  roundLose() { this.tone('triangle', 392, 392, 0.16, 0.2); this.tone('triangle', 262, 262, 0.26, 0.2, 0.13); }
 }
